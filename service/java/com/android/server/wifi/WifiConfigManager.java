@@ -450,6 +450,14 @@ public class WifiConfigManager {
         updatePnoRecencySortingSetting();
         mConnectedMacRandomzationSupported = mContext.getResources()
                 .getBoolean(R.bool.config_wifi_connected_mac_randomization_supported);
+        mDeviceConfigFacade = deviceConfigFacade;
+        mDeviceConfigFacade.addOnPropertiesChangedListener(
+                command -> new Handler(looper).post(command),
+                properties -> {
+                    mRandomizationFlakySsidHotlist =
+                            mDeviceConfigFacade.getRandomizationFlakySsidHotlist();
+                });
+        mRandomizationFlakySsidHotlist = mDeviceConfigFacade.getRandomizationFlakySsidHotlist();
         try {
             mSystemUiUid = mContext.getPackageManager().getPackageUidAsUser(SYSUI_PACKAGE_NAME,
                     PackageManager.MATCH_SYSTEM_ONLY, UserHandle.USER_SYSTEM);
