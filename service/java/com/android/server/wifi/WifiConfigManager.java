@@ -276,7 +276,6 @@ public class WifiConfigManager {
     private final WifiPermissionsUtil mWifiPermissionsUtil;
     private final WifiPermissionsWrapper mWifiPermissionsWrapper;
     private final WifiInjector mWifiInjector;
-    private final MacAddressUtil mMacAddressUtil;
     private boolean mConnectedMacRandomzationSupported;
     private final Mac mMac;
 
@@ -321,7 +320,6 @@ public class WifiConfigManager {
     private final int mMaxNumActiveChannelsForPartialScans;
 
     private final FrameworkFacade mFrameworkFacade;
-    private final DeviceConfigFacade mDeviceConfigFacade;
 
     /**
      * Verbose logging flag. Toggled by developer options.
@@ -450,21 +448,12 @@ public class WifiConfigManager {
         updatePnoRecencySortingSetting();
         mConnectedMacRandomzationSupported = mContext.getResources()
                 .getBoolean(R.bool.config_wifi_connected_mac_randomization_supported);
-        mDeviceConfigFacade = deviceConfigFacade;
-        mDeviceConfigFacade.addOnPropertiesChangedListener(
-                command -> new Handler(looper).post(command),
-                properties -> {
-                    mRandomizationFlakySsidHotlist =
-                            mDeviceConfigFacade.getRandomizationFlakySsidHotlist();
-                });
-        mRandomizationFlakySsidHotlist = mDeviceConfigFacade.getRandomizationFlakySsidHotlist();
         try {
             mSystemUiUid = mContext.getPackageManager().getPackageUidAsUser(SYSUI_PACKAGE_NAME,
                     PackageManager.MATCH_SYSTEM_ONLY, UserHandle.USER_SYSTEM);
         } catch (PackageManager.NameNotFoundException e) {
             Log.e(TAG, "Unable to resolve SystemUI's UID.");
         }
-        mMacAddressUtil = mWifiInjector.getMacAddressUtil();
         mMac = WifiConfigurationUtil.obtainMacRandHashFunction(Process.WIFI_UID);
         if (mMac == null) {
             Log.wtf(TAG, "Failed to obtain secret for MAC randomization."
@@ -521,18 +510,7 @@ public class WifiConfigManager {
                 mRandomizedMacAddressMapping.remove(config.getSsidAndSecurityTypeString());
             }
         }
-        MacAddress result = mMacAddressUtil.calculatePersistentMacForConfiguration(
-                config, mMacAddressUtil.obtainMacRandHashFunction(Process.WIFI_UID));
-        if (result == null) {
-            result = mMacAddressUtil.calculatePersistentMacForConfiguration(
-                    config, mMacAddressUtil.obtainMacRandHashFunction(Process.WIFI_UID));
-        }
-        if (result == null) {
-            Log.wtf(TAG, "Failed to generate MAC address from KeyStore even after retrying. "
-                    + "Using locally generated MAC address instead.");
-            result = MacAddress.createRandomUnicastAddress();
-        }
-        return result;
+        return WifiConfigurationUtil.calculatePersistentMacForConfiguration(config, mMac);
     }
 
     /**
@@ -1238,12 +1216,11 @@ public class WifiConfigManager {
             return new NetworkUpdateResult(WifiConfiguration.INVALID_NETWORK_ID);
         }
 
-        // Update the keys for non-Passpoint enterprise networks.  For Passpoint, the certificates
-        // and keys are installed at the time the provider is installed.
-        if (config.enterpriseConfig != null
-                && config.enterpriseConfig.getEapMethod() != WifiEnterpriseConfig.Eap.NONE
-                && !config.isPasspoint()) {
-            if (!(mWifiKeyStore.updateNetworkKeys(newInternalConfig, existingInternalConfig))) {
+        // Update the keys for saved enterprise networks. For Passpoint, the certificates
+        // and keys are installed at the time the provider is installed. For suggestion enterprise
+        // network the certificates and keys are installed at the time the suggestion is added
+        if (!config.isPasspoint() && !config.fromWifiNetworkSuggestion && config.isEnterprise()) {
+            if (!mWifiKeyStore.updateNetworkKeys(newInternalConfig, existingInternalConfig)) {
                 return new NetworkUpdateResult(WifiConfiguration.INVALID_NETWORK_ID);
             }
         }
@@ -1380,9 +1357,10 @@ public class WifiConfigManager {
         if (mVerboseLoggingEnabled) {
             Log.v(TAG, "Removing network " + config.getPrintableSsid());
         }
-        // Remove any associated enterprise keys for non-Passpoint networks.
-        if (!config.isPasspoint() && config.enterpriseConfig != null
-                && config.enterpriseConfig.getEapMethod() != WifiEnterpriseConfig.Eap.NONE) {
+        // Remove any associated enterprise keys for saved enterprise networks. Passpoint network
+        // will remove the enterprise keys when provider is uninstalled. Suggestion enterprise
+        // networks will remove the enterprise keys when suggestion is removed.
+        if (!config.isPasspoint() && !config.fromWifiNetworkSuggestion && config.isEnterprise()) {
             mWifiKeyStore.removeKeys(config.enterpriseConfig);
         }
 
@@ -1566,6 +1544,12 @@ public class WifiConfigManager {
      */
     private void setNetworkSelectionEnabled(WifiConfiguration config) {
         NetworkSelectionStatus status = config.getNetworkSelectionStatus();
+        if (status.getNetworkSelectionStatus()
+                != NetworkSelectionStatus.NETWORK_SELECTION_ENABLED) {
+            localLog("setNetworkSelectionEnabled: configKey=" + config.configKey()
+                    + " old networkStatus=" + status.getNetworkStatusString()
+                    + " disableReason=" + status.getNetworkDisableReasonString());
+        }
         status.setNetworkSelectionStatus(
                 NetworkSelectionStatus.NETWORK_SELECTION_ENABLED);
         status.setDisableTime(
